@@ -1,0 +1,6 @@
+google-generativeai
+SpeechRecognition
+pyttsx3
+langdetect
+googletrans==4.0.0-rc1
+python-dotenv

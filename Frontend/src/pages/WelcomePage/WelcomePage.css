@@ -1,0 +1,58 @@
+/* WelcomePage.css */
+.welcome-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  background: linear-gradient(to right, #4caf50, #2196f3);
+}
+
+.welcome-card {
+  background: rgba(170, 170, 170, 0.6);
+  padding: 60px;
+  border-radius: 15px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+  width: 50%;
+  max-width: 500px;
+  text-align: center;
+}
+
+.welcome-heading {
+  font-size: 2.2rem;
+  margin-bottom: 30px;
+  font-family: Georgia, "Times New Roman", Times, serif;
+  color: #fff;
+}
+
+.welcome-text {
+  font-size: 1.1rem;
+  margin-bottom: 30px;
+  font-family: Georgia, "Times New Roman", Times, serif;
+  color: #fff;
+}
+
+.welcome-button {
+  padding: 12px 30px;
+  background: #4caf50;
+  color: white;
+  border: none;
+  border-radius: 50px;
+  font-size: 1.1rem;
+  font-family: Poppins, sans-serif;
+  cursor: pointer;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+  transition: transform 0.3s ease, background 0.3s ease;
+  outline: none;
+}
+
+.welcome-button:hover {
+  background: #388e3c;
+  transform: translateY(-2px);
+}
+
+@media (max-width: 400px) {
+  .welcome-card {
+    width: 90%;
+    padding: 30px;
+  }
+}

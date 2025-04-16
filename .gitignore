@@ -1,0 +1,15 @@
+# Node.js dependencies
+**/node_modules/
+
+# Python virtual environments (if any)
+**/venv/
+
+# Environment variables
+*.env
+
+# VSCode settings
+**/.vscode/
+
+# OS system files
+.DS_Store
+Thumbs.db
