@@ -1,45 +1,35 @@
 import React, { useState, useRef, useEffect, useCallback, forwardRef } from 'react';
-import { SendIcon, PaperclipIcon, MicrophoneIcon } from './Icons';
+import { SendIcon, MicrophoneIcon } from './Icons';
 
-// Type definitions for the Web Speech API to fix TypeScript errors.
-interface SpeechRecognitionErrorEvent extends Event {
-  readonly error: string;
-}
-
-interface SpeechRecognitionAlternative {
-  readonly transcript: string;
-  readonly confidence: number;
-}
-
+// --- Web Speech API type declarations ---
+interface SpeechRecognitionErrorEvent extends Event { readonly error: string; }
+interface SpeechRecognitionAlternative { readonly transcript: string; }
 interface SpeechRecognitionResult {
   readonly isFinal: boolean;
   readonly length: number;
-  item(index: number): SpeechRecognitionAlternative;
   [index: number]: SpeechRecognitionAlternative;
 }
-
 interface SpeechRecognitionResultList {
   readonly length: number;
-  item(index: number): SpeechRecognitionResult;
   [index: number]: SpeechRecognitionResult;
 }
-
 interface SpeechRecognitionEvent extends Event {
   readonly resultIndex: number;
   readonly results: SpeechRecognitionResultList;
 }
-
 interface SpeechRecognition extends EventTarget {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
+  maxAlternatives: number;
   start(): void;
   stop(): void;
-  onresult: (this: SpeechRecognition, ev: SpeechRecognitionEvent) => any;
-  onend: (this: SpeechRecognition, ev: Event) => any;
-  onerror: (this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => any;
+  abort(): void;
+  onresult: ((ev: SpeechRecognitionEvent) => any) | null;
+  onend: ((ev: Event) => any) | null;
+  onerror: ((ev: SpeechRecognitionErrorEvent) => any) | null;
+  onstart: ((ev: Event) => any) | null;
 }
-
 declare global {
   interface Window {
     SpeechRecognition?: new () => SpeechRecognition;
@@ -48,226 +38,228 @@ declare global {
 }
 
 interface ChatInputProps {
-  onSendMessage: (message: string, attachment?: File) => void;
+  onSendMessage: (message: string) => void;
   isLoading: boolean;
 }
 
-const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(({ onSendMessage, isLoading }, ref) => {
-  const [input, setInput] = useState('');
-  const [attachment, setAttachment] = useState<File | null>(null);
-  const [isListening, setIsListening] = useState(false);
-  const [placeholder, setPlaceholder] = useState({
-    text: "Type a message, or hold the mic to speak.",
-    isError: false,
-  });
-  const internalTextareaRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const placeholderTimeoutRef = useRef<number | null>(null);
+const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(
+  ({ onSendMessage, isLoading }, ref) => {
+    const [input, setInput] = useState('');
+    const [isListening, setIsListening] = useState(false);
+    const [statusMsg, setStatusMsg] = useState('');
+    const [statusError, setStatusError] = useState(false);
 
-  const resetPlaceholder = useCallback(() => {
-    if (placeholderTimeoutRef.current) {
-      clearTimeout(placeholderTimeoutRef.current);
-    }
-    setPlaceholder({ text: "Type a message, or hold the mic to speak.", isError: false });
-  }, []);
+    const internalTextareaRef = useRef<HTMLTextAreaElement>(null);
+    const recognitionRef = useRef<SpeechRecognition | null>(null);
+    const shouldRestartRef = useRef(false);
+    const statusTimeoutRef = useRef<number | null>(null);
 
-  const submitMessage = useCallback((message: string, file?: File) => {
-    if ((message.trim() || file) && !isLoading) {
-        onSendMessage(message, file || undefined);
+    const clearStatus = useCallback(() => {
+      if (statusTimeoutRef.current) clearTimeout(statusTimeoutRef.current);
+      setStatusMsg('');
+      setStatusError(false);
+    }, []);
+
+    const setTempError = useCallback((msg: string) => {
+      if (statusTimeoutRef.current) clearTimeout(statusTimeoutRef.current);
+      setStatusMsg(msg);
+      setStatusError(true);
+      statusTimeoutRef.current = window.setTimeout(clearStatus, 5000);
+    }, [clearStatus]);
+
+    // Auto-resize textarea
+    useEffect(() => {
+      const ta = internalTextareaRef.current;
+      if (ta) { ta.style.height = 'auto'; ta.style.height = `${ta.scrollHeight}px`; }
+    }, [input]);
+
+    // Cleanup on unmount
+    useEffect(() => {
+      return () => {
+        shouldRestartRef.current = false;
+        recognitionRef.current?.abort();
+        if (statusTimeoutRef.current) clearTimeout(statusTimeoutRef.current);
+      };
+    }, []);
+
+    const startListening = useCallback(() => {
+      const SpeechAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechAPI) {
+        setTempError('Speech recognition not supported. Please use Chrome or Edge.');
+        return;
+      }
+
+      // Null FIRST before aborting, so the old instance's onend doesn't trigger a restart
+      if (recognitionRef.current) {
+        const old = recognitionRef.current;
+        recognitionRef.current = null;
+        old.abort();
+      }
+
+      const rec = new SpeechAPI();
+      // Empty lang = browser auto-detect (works best in Chrome)
+      rec.lang = '';
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.maxAlternatives = 1;
+
+      let finalTranscript = '';
+
+      rec.onstart = () => {
+        console.log('[ASR] Started (auto-detect language)');
+        finalTranscript = '';
         setInput('');
-        setAttachment(null);
-        if (fileInputRef.current) {
-            fileInputRef.current.value = '';
+      };
+
+      rec.onresult = (event: SpeechRecognitionEvent) => {
+        let interim = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const res = event.results[i];
+          if (res.isFinal) {
+            finalTranscript += res[0].transcript;
+          } else {
+            interim += res[0].transcript;
+          }
         }
-    }
-  }, [isLoading, onSendMessage]);
+        setInput(finalTranscript + interim);
+      };
 
+      rec.onerror = (event: SpeechRecognitionErrorEvent) => {
+        if (event.error === 'aborted') return; // Intentional stop — ignore
+        console.error('[ASR] Error:', event.error);
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          setTempError('Microphone access denied. Please allow it in browser settings.');
+          shouldRestartRef.current = false;
+          setIsListening(false);
+        } else if (event.error === 'network') {
+          setTempError('Network error in speech recognition.');
+          shouldRestartRef.current = false;
+          setIsListening(false);
+        }
+        // For 'no-speech' and others: let onend handle the restart
+      };
 
-  useEffect(() => {
-    return () => {
-      if (placeholderTimeoutRef.current) {
-        clearTimeout(placeholderTimeoutRef.current);
+      rec.onend = () => {
+        // CRITICAL: null BEFORE scheduling restart to prevent abort-loop
+        recognitionRef.current = null;
+        if (shouldRestartRef.current) {
+          setTimeout(() => {
+            if (shouldRestartRef.current) startListening();
+          }, 300);
+        } else {
+          setIsListening(false);
+          clearStatus();
+        }
+      };
+
+      recognitionRef.current = rec;
+      try {
+        rec.start();
+      } catch (e) {
+        console.error('[ASR] start() failed:', e);
+        recognitionRef.current = null;
+        setTempError('Could not start microphone. Try again.');
+        shouldRestartRef.current = false;
+        setIsListening(false);
       }
-    };
-  }, []);
-  
-  useEffect(() => {
-    const textarea = internalTextareaRef.current;
-    if (textarea) {
-      textarea.style.height = 'auto';
-      textarea.style.height = `${textarea.scrollHeight}px`;
-    }
-  }, [input]);
-  
-  useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      console.warn("Speech Recognition not supported by this browser.");
-      return;
-    }
+    }, [setTempError, clearStatus]);
 
-    const recognition: SpeechRecognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      let transcript = '';
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        transcript += event.results[i][0].transcript;
+    const stopListening = useCallback(() => {
+      shouldRestartRef.current = false;
+      if (recognitionRef.current) {
+        const old = recognitionRef.current;
+        recognitionRef.current = null;
+        old.stop();
       }
-      setInput(transcript);
-    };
-
-    recognition.onend = () => {
       setIsListening(false);
-      resetPlaceholder();
-    };
+      clearStatus();
+    }, [clearStatus]);
 
-    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      console.error("Speech Recognition Error:", event.error);
-      let message = "Sorry, a speech recognition error occurred.";
-      if (event.error === 'no-speech') {
-        message = "I didn't catch that. Please try again.";
-      } else if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-        message = "Microphone access denied. Please enable it in browser settings.";
+    const handleMicToggle = () => {
+      if (isLoading) return;
+      if (isListening) {
+        stopListening();
+      } else {
+        shouldRestartRef.current = true;
+        setIsListening(true);
+        clearStatus();
+        startListening();
       }
-      
-      setPlaceholder({ text: message, isError: true });
-
-      if (placeholderTimeoutRef.current) clearTimeout(placeholderTimeoutRef.current);
-      placeholderTimeoutRef.current = window.setTimeout(resetPlaceholder, 5000);
     };
 
-    recognitionRef.current = recognition;
-
-    return () => {
-      recognition.stop();
-    };
-  }, [resetPlaceholder]);
-
-  const handleMicDown = () => {
-    if (isLoading || isListening) return;
-    const recognition = recognitionRef.current;
-    if (!recognition) return;
-
-    resetPlaceholder();
-    setInput('');
-    setPlaceholder({ text: "Listening...", isError: false });
-    try {
-      recognition.start();
-      setIsListening(true);
-    } catch (e) {
-      console.error("Error starting speech recognition:", e);
-      setPlaceholder({text: "Could not start listening.", isError: true});
-    }
-  };
-
-  const handleMicUp = () => {
-    if (!isListening) return;
-    const recognition = recognitionRef.current;
-    if (recognition) {
-      recognition.stop();
-    }
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    submitMessage(input, attachment || undefined);
-  };
-  
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    const handleSubmit = (e: React.FormEvent) => {
       e.preventDefault();
-      handleSubmit(e as any);
-    }
-  };
+      if (isListening) stopListening();
+      if (input.trim() && !isLoading) {
+        onSendMessage(input);
+        setInput('');
+      }
+    };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setAttachment(e.target.files[0]);
-    }
-  };
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSubmit(e as any);
+      }
+    };
 
-  return (
-    <div>
-        {attachment && (
-            <div className="bg-gray-700/50 p-2 rounded-t-lg flex items-center justify-between text-sm">
-                <span className="text-gray-300 truncate px-2">{attachment.name}</span>
-                <button 
-                    onClick={() => {
-                        setAttachment(null);
-                        if (fileInputRef.current) fileInputRef.current.value = '';
-                    }}
-                    className="text-gray-400 hover:text-white font-bold text-lg leading-none p-1">&times;</button>
-            </div>
-        )}
+    const placeholder = isListening
+      ? '🎤 Listening… speak in any language'
+      : (statusMsg || 'Type or speak in any language…');
+
+    return (
+      <div>
         <form
-            onSubmit={handleSubmit}
-            className={`flex items-end space-x-2 bg-gray-800 border border-gray-700 p-2 ${attachment ? 'rounded-b-xl' : 'rounded-xl'}`}
+          onSubmit={handleSubmit}
+          className="flex items-end space-x-2 bg-gray-800 border border-gray-700 p-2 rounded-xl"
         >
-            <input
-                type="file"
-                ref={fileInputRef}
-                onChange={handleFileChange}
-                className="hidden"
-                accept="image/*,text/*,application/pdf,audio/*,video/*"
-            />
-            <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isLoading || isListening}
-                className="text-gray-400 hover:text-white disabled:opacity-50 transition-colors p-2"
-                aria-label="Attach file"
-            >
-                <PaperclipIcon />
-            </button>
-            <button
-                type="button"
-                onMouseDown={handleMicDown}
-                onMouseUp={handleMicUp}
-                onTouchStart={handleMicDown}
-                onTouchEnd={handleMicUp}
-                onMouseLeave={handleMicUp}
-                disabled={isLoading}
-                className={`p-2 transition-colors disabled:opacity-50 select-none ${isListening ? 'text-red-500 animate-pulse' : 'text-gray-400 hover:text-white'}`}
-                aria-label={isListening ? 'Release to stop' : 'Hold to speak'}
-            >
-                <MicrophoneIcon />
-            </button>
-            <textarea
-                ref={(node) => {
-                    // Assign to the internal ref used by the component's effects
-                    (internalTextareaRef as React.MutableRefObject<HTMLTextAreaElement | null>).current = node;
-                    
-                    // Assign to the forwarded ref passed from the parent
-                    if (typeof ref === 'function') {
-                        ref(node);
-                    } else if (ref) {
-                        ref.current = node;
-                    }
-                }}
-                rows={1}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={placeholder.text}
-                disabled={isLoading}
-                className={`flex-1 bg-transparent resize-none outline-none px-2 py-2 text-white disabled:opacity-50 max-h-48 ${placeholder.isError ? 'placeholder-red-400' : 'placeholder-gray-500'}`}
-                style={{ scrollbarWidth: 'none' }}
-            />
-            <button
-                type="submit"
-                disabled={isLoading || (!input.trim() && !attachment)}
-                className="bg-gray-700 text-white rounded-lg w-9 h-9 flex items-center justify-center flex-shrink-0 hover:bg-gray-600 disabled:bg-gray-600/50 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-purple-500"
-                aria-label="Send message"
-            >
-                <SendIcon />
-            </button>
+          {/* Mic button */}
+          <button
+            type="button"
+            onClick={handleMicToggle}
+            disabled={isLoading}
+            title={isListening ? 'Click to stop' : 'Click to speak (auto-detects language)'}
+            className={`flex-shrink-0 p-2 rounded-lg transition-all select-none disabled:opacity-50 ${
+              isListening
+                ? 'text-red-400 bg-red-500/20 animate-pulse ring-1 ring-red-500/50'
+                : 'text-gray-400 hover:text-white hover:bg-gray-700'
+            }`}
+          >
+            <MicrophoneIcon />
+          </button>
+
+          {/* Text input */}
+          <textarea
+            ref={(node) => {
+              (internalTextareaRef as React.MutableRefObject<HTMLTextAreaElement | null>).current = node;
+              if (typeof ref === 'function') ref(node);
+              else if (ref) ref.current = node;
+            }}
+            rows={1}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={placeholder}
+            disabled={isLoading}
+            className={`flex-1 bg-transparent resize-none outline-none px-2 py-2 text-white disabled:opacity-50 max-h-48 ${
+              statusError ? 'placeholder-red-400' : 'placeholder-gray-500'
+            }`}
+            style={{ scrollbarWidth: 'none' }}
+          />
+
+          {/* Send button */}
+          <button
+            type="submit"
+            disabled={isLoading || !input.trim()}
+            className="flex-shrink-0 bg-gray-700 text-white rounded-lg w-9 h-9 flex items-center justify-center hover:bg-gray-600 disabled:bg-gray-600/50 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-purple-500"
+            aria-label="Send message"
+          >
+            <SendIcon />
+          </button>
         </form>
-    </div>
-  );
-});
+      </div>
+    );
+  }
+);
 
 export default ChatInput;
